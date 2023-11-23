@@ -4,84 +4,75 @@
 #include <sys/stat.h>
 #include <libconfig.h>
 #include <time.h>
+#include <dirent.h>
 #include <stdbool.h>
+#include <syslog.h>
+#include <string.h>
 
 #define EXIT_FAIL -1
 #define EXIT_SUCCESS 0
 
 #define RUN_DIR "/tmp/"
-#define CFG_PATH "/home/azazuent/code/daemon/daemon.cfg"
-#define LOG_PATH "/home/azazuent/code/daemon/daemon.log"
+#define CFG_PATH "/etc/daemon.conf"
 
-#define INFO 0
-#define ERROR -1
-#define DEBUG 1
+const char* dir_path;
+int check_period;
 
-bool hup_received = false;
-bool term_received = false;
-
-struct cfg
-{
-	int n_dir;
-	const char* *dirs;
-
-	int r_period;
-};
-
-bool log_write(const char* log_path, const char* log_message, int status)
-{
-	FILE* log_file = fopen(log_path, "at");
-	if (!log_file)
-		return false;
-
-	time_t cur_time = time(NULL);
-	char log_time[20];
-	strftime(log_time, 20, "%Y-%m-%d %H:%M:%S", localtime(&cur_time));
-
-	const char* log_status;
-	switch (status)
-	{
-		case INFO:
-			log_status = "[INFO]";
-			break;
-		case ERROR:
-			log_status = "[ERROR]";
-			break;
-		case DEBUG:
-			log_status = "[DEBUG]";
-			break;
-		default:
-			log_status = "[UNDEFINED]";
-			break;
-	}
-	fprintf(log_file, "%s %s: %s\n", log_time, log_status, log_message);
-
-	fclose(log_file);
-	return true;
-}
-
-/*
-struct cfg* read_cfg(const char* cfg_path)
+bool read_cfg(const char* cfg_path, const char **dir_path_buf, int *check_period_buf)
 {
 	config_t cfg;
 	config_init(&cfg);
 	if (!config_read_file(&cfg, cfg_path))
 	{
-		log_write(LOG_PATH, "Failed reading configuration file", ERROR);
+		syslog(LOG_ERR, "Failed reading configuration file %s", cfg_path);
 		config_destroy(&cfg);
-		return NULL;
+		return false;
 	}
+
+	const config_setting_t *root = config_root_setting(&cfg);
+
+	const config_setting_t *dir = config_setting_get_member(root, "dir");
+
+	if (dir == NULL)
+	{
+		syslog(LOG_ERR, "Failed reading dir value from configuration file %s", cfg_path);
+		return false;
+	}
+
+	DIR* d = opendir(config_setting_get_string(dir));
+	if (!d)
+	{
+		syslog(LOG_ERR, "Failed to access directory from configuration file %s", cfg_path);
+		return false;
+	}
+	closedir(d);
+
+
+	const config_setting_t *period = config_setting_get_member(root, "period");
+
+	if (period == NULL)
+	{
+		syslog(LOG_ERR, "Failed reading period value from configuration file %s", cfg_path);
+		return false;
+	}
+
+	*dir_path_buf = config_setting_get_string(dir);
+	*check_period_buf = config_setting_get_int(period);
+
+	return true;
 }
-*/
+
 void signal_handler(int sig)
 {
-	switch(sig) 
+	switch(sig)
 	{
 		case SIGHUP:
-			hup_received = true;
+			if (read_cfg(CFG_PATH, &dir_path, &check_period))
+				syslog(LOG_INFO, "Successfully refreshed configuration");
 			break;
 		case SIGTERM:
-			term_received = true;
+			syslog(LOG_INFO, "Successfully stopped daemon");
+			exit(EXIT_SUCCESS);
 			break;
 	}
 }
@@ -92,7 +83,7 @@ void daemonize()
 
 	if (pid < 0)
 	{
-		log_write(LOG_PATH, "Failed forking from parent process", ERROR);
+		syslog(LOG_ERR, "Failed forking from parent process");
 		exit(EXIT_FAIL);
 	}
 
@@ -110,13 +101,13 @@ void daemonize()
 
 	if (sid < 0)
 	{
-		log_write(LOG_PATH, "Failed to set SID", ERROR);
+		syslog(LOG_ERR, "Failed to set SID");
 		exit(EXIT_FAIL);
 	}
 
 	if (chdir(RUN_DIR) < 0)
 	{
-		log_write(LOG_PATH, "Failed to move running directory", ERROR);
+		syslog(LOG_ERR, "Failed to move running directory");
 		exit(EXIT_FAIL);
 	}
 
@@ -126,20 +117,73 @@ void daemonize()
 	}
 }
 
-int main()
+void check_if_modified(const char* path, int period)
 {
+	struct stat file_info;
+	if (stat(path, &file_info) < 0)
+	{
+		//syslog(LOG_ERR, "%s %s", "Failed accessing file", file_path);
+		return;
+	}
+	if (S_ISREG(file_info.st_mode))
+	{
+		int cur_time = (int)time(NULL);
+		int mod_time = (int)file_info.st_mtime;
+
+		if (cur_time - period < mod_time)
+		{
+			char *str_mod_time = (char*)malloc(20 * sizeof(char));
+			strftime(str_mod_time, 20, "%Y-%m-%d %H:%M:%S", localtime(&file_info.st_ctime));
+
+			syslog(LOG_INFO, "%s %s %s", path, "modified at", str_mod_time);
+
+			free(str_mod_time);
+			return;
+		}
+	}
+	else if (S_ISDIR(file_info.st_mode))
+	{
+		DIR *dir;
+		struct dirent *entry;
+
+		if((dir = opendir(path)) == NULL)
+		{
+			//syslog(LOG_ERR, "%s %s", "Failed opening directory", file_path);
+			return;
+		}
+
+		while ((entry = readdir(dir)) != NULL)
+		{
+			if (entry->d_name[0] != '.')
+			{
+				int new_path_len = strlen(path) + strlen(entry->d_name) + 2;
+				char* new_path = (char*)malloc(new_path_len * sizeof(char*));
+
+				snprintf(new_path, new_path_len, "%s/%s", path, entry->d_name);
+
+				check_if_modified(new_path, period);
+
+				free(new_path);
+			}
+		}
+		closedir(dir);
+	}
+}
+
+void main()
+{
+	openlog("daemon", LOG_PID, LOG_USER);
+
+	if (!read_cfg(CFG_PATH, &dir_path, &check_period))
+		exit(EXIT_FAIL);
+
 	daemonize();
 
-	log_write(LOG_PATH, "Successfully started daemon", INFO);
+	syslog(LOG_INFO, "Successfully started daemon");
 
-	int i = 0;
 	while(true)
 	{
-		sleep(1);
-		i++;
-		if (term_received) break;
+		sleep(check_period);
+		check_if_modified(dir_path, check_period);
 	}
-
-	log_write(LOG_PATH, "Successfully stopped daemon", INFO);
-	return 0;
 }
