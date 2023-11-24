@@ -68,7 +68,7 @@ void signal_handler(int sig)
 	{
 		case SIGHUP:
 			if (read_cfg(CFG_PATH, &dir_path, &check_period))
-				syslog(LOG_INFO, "Successfully refreshed configuration");
+				syslog(LOG_INFO, "Successfully redirected daemon to %s", dir_path);
 			break;
 		case SIGTERM:
 			syslog(LOG_INFO, "Successfully stopped daemon");
@@ -179,7 +179,7 @@ void main()
 
 	daemonize();
 
-	syslog(LOG_INFO, "Successfully started daemon");
+	syslog(LOG_INFO, "Successfully started daemon at %s", dir_path);
 
 	while(true)
 	{
