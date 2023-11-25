@@ -72,6 +72,7 @@ void signal_handler(int sig)
 			break;
 		case SIGTERM:
 			syslog(LOG_INFO, "Successfully stopped daemon");
+			closelog();
 			exit(EXIT_SUCCESS);
 			break;
 	}
@@ -157,7 +158,7 @@ void check_if_modified(const char* path, int period)
 			if (entry->d_name[0] != '.')
 			{
 				int new_path_len = strlen(path) + strlen(entry->d_name) + 2;
-				char* new_path = (char*)malloc(new_path_len * sizeof(char*));
+				char* new_path = (char*)malloc(new_path_len * sizeof(char));
 
 				snprintf(new_path, new_path_len, "%s/%s", path, entry->d_name);
 
